@@ -6,7 +6,6 @@ import torch
 import numpy as np
 from tqdm.auto import tqdm
 import collections
-from azureml.core.run import Run
 from datasets import load_dataset, load_metric
 from transformers import DistilBertForQuestionAnswering, DistilBertTokenizerFast, TrainingArguments, Trainer, DefaultDataCollator
 
@@ -19,14 +18,13 @@ from transformers import DistilBertForQuestionAnswering, DistilBertTokenizerFast
 # duorc
 
 ds = "duorc"
-ms = "distilbert-base-cased-distilled-squad"
+ms = "machine2049/distilbert-base-uncased-finetuned-duorc_distilbert"
 pad_on_right = False
 tokenizer = None
 
 def get_args(raw_args=None):
     parser = argparse.ArgumentParser(description="DistilBERT Fine-Tuning")
 
-    parser.add_argument("--ort", action="store_true", help="Use ORTModule")
     parser.add_argument("--deepspeed", action="store_true", help="Use deepspeed")
 
     args = parser.parse_args(raw_args)
@@ -286,19 +284,13 @@ def main(raw_args=None):
     dataset = load_dataset("squad", split="validation") if ds == "squad" else load_dataset("duorc", "SelfRC", split="validation")
 
     if ds == "duorc":
-        # dataset["train"] = dataset["train"].rename_column("plot", "context")
         dataset = dataset.rename_column("plot", "context")
-        # dataset["validation"] = dataset["validation"].rename_column("plot", "context")
 
     # load pretrained model and tokenizer
     tokenizer = DistilBertTokenizerFast.from_pretrained(ms)
     model = DistilBertForQuestionAnswering.from_pretrained(ms)
 
     pad_on_right = tokenizer.padding_side == "right"
-
-    if args.ort:
-        from onnxruntime.training import ORTModule
-        model = ORTModule(model)
 
     ppf = preprocess_squad if ds == "squad" else preprocess_duorc
 
@@ -360,7 +352,7 @@ def main(raw_args=None):
     batch = None
     for batch in trainer.get_eval_dataloader():
         break
-    # batch = {k: v.to(trainer.args.device) for k, v in batch.items()}
+    batch = {k: v.to(trainer.args.device) for k, v in batch.items()}
     with torch.no_grad():
         output = trainer.model(**batch)
 
@@ -412,15 +404,37 @@ def main(raw_args=None):
     valid_answers = sorted(valid_answers, key=lambda x: x["score"], reverse=True)[:n_best_size]
     example_id_to_index = {k: i for i, k in enumerate(dataset[ids])}
     features_per_example = collections.defaultdict(list)
+    references = [{"id": ex[ids], "answers": ex["answers"]} for ex in dataset]
 
     for i, feature in enumerate(validation_features):
         features_per_example[example_id_to_index[feature["example_id"]]].append(i)
 
     final_predictions = postprocess_qa_predictions(dataset, validation_features, raw_predictions.predictions)
-    metric = load_metric(ds)
-    formatted_predictions = [{"id": k, "prediction_text": v} for k, v in final_predictions.items()]
-    references = [{"id": ex[ids], "answers": ex["answers"]} for ex in dataset]
-    res = metric.compute(predictions=formatted_predictions, references=references)
+
+    # export to files for evaluation
+    if ds == "duorc":
+        from evaluate import load_eval
+        da = "duorc_answers.json"
+        dp = "duorc_predictions.json"
+
+        answers = [{"qa": references}]
+        predictions = {}
+        for k, v in final_predictions.items():
+            predictions[k] = v
+
+        with open(da, "w") as f:
+            json.dump(answers, f)
+            f.close()
+
+        with open(dp, "w") as f:
+            json.dump(predictions, f)
+            f.close()
+
+        res = load_eval(da, dp)
+    else:
+        metric = load_metric(ds)
+        formatted_predictions = [{"id": k, "prediction_text": v} for k, v in final_predictions.items()]
+        res = metric.compute(predictions=formatted_predictions, references=references)
 
     print(f"Finished evaluating {ms} on {ds}", res)
 

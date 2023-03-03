@@ -127,3 +127,5 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+duorc_answers.json
+duorc_predictions.json
