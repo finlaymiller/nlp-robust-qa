@@ -413,7 +413,7 @@ def main(raw_args=None):
 
     # export to files for evaluation
     if ds == "duorc":
-        from evaluate import load_eval
+        from eval_custom import load_eval
         da = "duorc_answers.json"
         dp = "duorc_predictions.json"
 

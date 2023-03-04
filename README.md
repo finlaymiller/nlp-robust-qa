@@ -2,6 +2,21 @@
 
 Project for CSCI6908 NLP with Deep Learning
 
+## Info
+
+### Models
+
+distilbert-base-uncased
+distilbert-base-cased-distilled-squad
+machine2049/distilbert-base-uncased-finetuned-duorc_distilbert
+gsgoncalves/distilbert-base-uncased-race
+
+### Datasets
+
+squad
+duorc
+race
+
 ## Results
 
 | Model                                                          | Dataset | EM     | F1     |
