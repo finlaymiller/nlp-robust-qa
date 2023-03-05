@@ -1,6 +1,7 @@
 # Custom
 .outputs/
 datasets/
+save/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

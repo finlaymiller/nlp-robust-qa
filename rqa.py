@@ -1,4 +1,5 @@
 import os
+import csv
 import json
 import time
 import torch
@@ -12,8 +13,9 @@ from transformers import DistilBertForQuestionAnswering, DistilBertTokenizerFast
 
 def get_args():
     parser = ArgumentParser()
+
     parser.add_argument('--batch-size', type=int, default=16)
-    parser.add_argument('--num-epochs', type=int, default=3)
+    parser.add_argument('--num-epochs', type=int, default=1)
     parser.add_argument('--lr', type=float, default=3e-5)
     parser.add_argument('--num-visuals', type=int, default=10)
     parser.add_argument('--seed', type=int, default=42)
@@ -25,14 +27,17 @@ def get_args():
     parser.add_argument('--recompute-features', action='store_true')
     parser.add_argument('--train-dir', type=str, default='datasets/indomain_train')
     parser.add_argument('--val-dir', type=str, default='datasets/indomain_val')
-    parser.add_argument('--eval-dir', type=str, default='datasets/oodomain_test')
+    parser.add_argument('--eval-dir', type=str, default='datasets/oodomain_val')
     parser.add_argument('--eval-datasets', type=str, default='race,relation_extraction,duorc')
     parser.add_argument('--do-train', action='store_true', default=True)
-    parser.add_argument('--do-eval', action='store_true')
+    parser.add_argument('--do-eval', action='store_true', default=True)
     parser.add_argument('--sub-file', type=str, default='')
     parser.add_argument('--visualize-predictions', action='store_true')
     parser.add_argument('--eval-every', type=int, default=5000)
+    parser.add_argument("--deepspeed", action="store_true", help="Use deepspeed")
+
     args = parser.parse_args()
+
     return args
 
 
@@ -137,9 +142,10 @@ def prepare_train_data(dataset_dict, tokenizer):
 
 def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, split):
     cache_path = f'{dir_name}/{dataset_name}_encodings.pt'
-    
+
     if os.path.exists(cache_path) and not args.recompute_features:
         tokenized_examples = util.load_pickle(cache_path)
+        print(len(tokenized_examples))
     else:
         if split=='train':
             tokenized_examples = prepare_train_data(dataset_dict, tokenizer)
@@ -150,13 +156,16 @@ def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, spli
 
 
 def get_dataset(args, datasets, data_dir, tokenizer, split_name):
-    datasets = datasets.split(',')
     dataset_dict = None
     dataset_name=''
 
-    for dataset in datasets:
+    for dataset, num_samples in datasets.items():
         dataset_name += f'_{dataset}'
         dataset_dict_curr = util.read_squad(f'{data_dir}/{dataset}')
+
+        for k, v in dataset_dict_curr.items():
+            dataset_dict_curr[k] = v[:num_samples]
+
         dataset_dict = util.merge(dataset_dict, dataset_dict_curr)
 
     data_encodings = read_and_process(args, tokenizer, dataset_dict, data_dir, dataset_name, split_name)
@@ -166,37 +175,91 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name):
 
 def main():
     st = time.time()
-
     args = get_args()
-
     tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
     model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
+    train_datasets = {"squad": 3, "nat_questions": 3, "newsqa": 3}
+    val_datasets = {"squad": 100}
 
     if args.do_train:
         if not os.path.exists(args.save_dir):
             os.makedirs(args.save_dir)
         
         log = util.get_logger(args.save_dir, 'log_train')
-        log.info(f'Args: {json.dumps(vars(args), indent=4, sort_keys=True)}')
-        log.info("Preparing Training Data...")
-    
-        args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        trainer = Trainer(args, log)
+        log.info(f'Args: {json.dumps(vars(args), indent=2, sort_keys=True)}')
 
-        train_dataset, _ = get_dataset(args, args.train_datasets, args.train_dir, tokenizer, 'train')
+        log.info("Preparing Training Data...")
+        args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        train_dataset, _ = get_dataset(args, train_datasets, args.train_dir, tokenizer, 'train')
 
         log.info("Preparing Validation Data...")
-        val_dataset, val_dict = get_dataset(args, args.train_datasets, args.val_dir, tokenizer, 'val')
-        
-        train_loader = DataLoader(train_dataset,
-                                batch_size=args.batch_size,
-                                sampler=RandomSampler(train_dataset))
-        val_loader = DataLoader(val_dataset,
-                                batch_size=args.batch_size,
-                                sampler=SequentialSampler(val_dataset))
-        best_scores = trainer.train(model, train_loader, val_loader, val_dict)
+        val_dataset, val_dict = get_dataset(args, val_datasets, args.eval_dir, tokenizer, 'val')
 
-    log.info(f"TIME {round(time.time() - st)}")
+        tad = {
+        "output_dir": args.save_dir,
+        "save_strategy": "epoch" if args.save_dir else "no",
+        "do_train": args.do_train,
+        "do_eval": args.do_eval,
+        "per_device_train_batch_size": 16,
+        "per_device_eval_batch_size": 16,
+        "learning_rate": args.lr,
+        "num_train_epochs": args.num_epochs,
+        "weight_decay": 0.01,
+        "fp16": True,
+        "deepspeed": "ds_config_zero_1.json" if args.deepspeed else None,
+        }
+
+        # train_loader = DataLoader(train_dataset,
+        #                         batch_size=args.batch_size,
+        #                         sampler=RandomSampler(train_dataset))
+        # val_loader = DataLoader(val_dataset,
+        #                         batch_size=args.batch_size,
+        #                         sampler=SequentialSampler(val_dataset))
+
+        trainer = Trainer(
+            model=model,
+            args=TrainingArguments(**tad),
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            tokenizer=tokenizer,
+            data_collator=DefaultDataCollator(),
+        )
+        
+
+        train_result = trainer.train()
+
+        # extract performance metrics
+        train_metrics = train_result.metrics
+        train_metrics["train_samples"] = sum(train_datasets.values())
+        trainer.log_metrics("train", train_metrics)
+    
+    if args.do_eval:
+        args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        split_name = 'test' if 'test' in args.eval_dir else 'validation'
+        log = util.get_logger(args.save_dir, f'log_{split_name}')
+        # trainer = Trainer(args, log)
+        # checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
+        # model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
+        # model.to(args.device)
+        eval_dataset, eval_dict = get_dataset(args, val_datasets, args.eval_dir, tokenizer, split_name)
+        eval_loader = DataLoader(eval_dataset,
+                                 batch_size=args.batch_size,
+                                 sampler=SequentialSampler(eval_dataset))
+        eval_preds, eval_scores = trainer.evaluate(model, eval_loader,
+                                                   eval_dict, return_preds=True,
+                                                   split=split_name)
+        results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in eval_scores.items())
+        log.info(f'Eval {results_str}')
+        # Write submission file
+        sub_path = os.path.join(args.save_dir, split_name + '_' + args.sub_file)
+        log.info(f'Writing submission file to {sub_path}...')
+        with open(sub_path, 'w', newline='', encoding='utf-8') as csv_fh:
+            csv_writer = csv.writer(csv_fh, delimiter=',')
+            csv_writer.writerow(['Id', 'Predicted'])
+            for uuid in sorted(eval_preds):
+                csv_writer.writerow([uuid, eval_preds[uuid]])
+
+    log.info(f"TIME {round(time.time() - st)}s")
 
 
 if __name__ == "__main__":
