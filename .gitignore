@@ -134,3 +134,5 @@ dmypy.json
 .pyre/
 duorc_answers.json
 duorc_predictions.json
+.amlignore
+.amlignore.amltmp

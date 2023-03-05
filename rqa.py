@@ -5,6 +5,7 @@ import time
 import util
 import torch
 from tqdm import tqdm
+from pathlib import Path
 from trainer import Trainer
 from argparse import ArgumentParser
 from torch.utils.data import DataLoader
@@ -32,7 +33,8 @@ def get_args():
     parser.add_argument('--do-eval', action='store_true')
     parser.add_argument('--sub-file', type=str, default='')
     parser.add_argument('--visualize-predictions', action='store_true')
-    parser.add_argument('--eval-every', type=int, default=5000)
+    parser.add_argument('--eval-every', type=int, default=200)
+    parser.add_argument('--load-model', type=str)
 
     args = parser.parse_args()
 
@@ -161,9 +163,10 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name):
         dataset_name += f'_{dataset}'
         dataset_dict_curr = util.read_squad(f'{data_dir}/{dataset}')
 
+        # trim data
         for k, v in dataset_dict_curr.items():
             dataset_dict_curr[k] = v[:num_samples]
-            print(f"Using {num_samples}/{len(v)} samples from {dataset}")
+        print(f"Using {num_samples}/{len(v)} samples from {dataset}")
 
         dataset_dict = util.merge(dataset_dict, dataset_dict_curr)
 
@@ -175,13 +178,16 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name):
 def main():
     st = time.time()
     args = get_args()
+
     tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
-    model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
+    model_name = os.path.join(args.load_model) if args.load_model else "distilbert-base-uncased"
+    model = DistilBertForQuestionAnswering.from_pretrained(model_name)
     log = util.get_logger(args.save_dir, 'log_train')
+    # train_datasets = {"duorc": 100, "race": 100, "relation_extraction": 100}
     train_datasets = {"squad": 3333, "nat_questions": 3333, "newsqa": 3333}
-    # val_datasets = {"squad": 4000, "nat_questions": 4000, "newsqa": 4000}
-    val_datasets = {"duorc": 400, "race": 400, "relation_extraction": 400}
-    args.eval_dir = "datasets/oodomain_val"
+    val_datasets = {"squad": 4000, "nat_questions": 4000, "newsqa": 4000}
+    # val_datasets = {"duorc": 400, "race": 400, "relation_extraction": 400}
+    args.eval_dir = "datasets/indomain_val"
 
     if args.do_train:
         if not os.path.exists(args.save_dir):
@@ -196,25 +202,6 @@ def main():
         log.info("Preparing Validation Data...")
         val_dataset, val_dict = get_dataset(args, val_datasets, args.eval_dir, tokenizer, 'val')
 
-        # print(f"train dataset keys: ", train_dataset.keys)
-        # print(f"train dict keys: ", train_dict.keys())
-        # print(f"vak dataset keys: ", val_dataset.keys)
-        # print(f"vak dict keys: ", val_dict.keys())
-
-        # tad = {
-        # "output_dir": args.save_dir,
-        # "save_strategy": "epoch" if args.save_dir else "no",
-        # "do_train": args.do_train,
-        # "do_eval": args.do_eval,
-        # "per_device_train_batch_size": 16,
-        # "per_device_eval_batch_size": 16,
-        # "learning_rate": args.lr,
-        # "num_train_epochs": args.num_epochs,
-        # "weight_decay": 0.01,
-        # "fp16": True,
-        # "deepspeed": "ds_config_zero_1.json" if args.deepspeed else None,
-        # }
-
         train_loader = DataLoader(train_dataset,
                                 batch_size=args.batch_size,
                                 sampler=RandomSampler(train_dataset))
@@ -224,14 +211,9 @@ def main():
         log.info("TRAINING")
         trainer = Trainer(args, log)
         
-
         train_result = trainer.train(model, train_loader, val_loader, val_dict)
 
-        log.info("FINISHED TRAINING")
-        # extract performance metrics
-        # train_metrics = train_result.metrics
-        # train_metrics["train_samples"] = sum(train_datasets.values())
-        # trainer.log_metrics("train", train_metrics)
+        log.info("FINISHED TRAINING", json.dump(train_result))
     
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
