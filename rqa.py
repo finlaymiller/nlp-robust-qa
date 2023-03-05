@@ -2,39 +2,37 @@ import os
 import csv
 import json
 import time
-import torch
 import util
+import torch
 from tqdm import tqdm
+from trainer import Trainer
 from argparse import ArgumentParser
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import RandomSampler, SequentialSampler
-from transformers import DistilBertForQuestionAnswering, DistilBertTokenizerFast, TrainingArguments, Trainer, DefaultDataCollator
+from transformers import DistilBertForQuestionAnswering, DistilBertTokenizerFast
 
 
 def get_args():
     parser = ArgumentParser()
 
     parser.add_argument('--batch-size', type=int, default=16)
-    parser.add_argument('--num-epochs', type=int, default=1)
+    parser.add_argument('--num-epochs', type=int, default=3)
     parser.add_argument('--lr', type=float, default=3e-5)
     parser.add_argument('--num-visuals', type=int, default=10)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--save-dir', type=str, default='save/')
-    parser.add_argument('--train', action='store_true')
-    parser.add_argument('--eval', action='store_true')
     parser.add_argument('--train-datasets', type=str, default='squad,nat_questions,newsqa')
     parser.add_argument('--run-name', type=str, default='qa')
     parser.add_argument('--recompute-features', action='store_true')
     parser.add_argument('--train-dir', type=str, default='datasets/indomain_train')
     parser.add_argument('--val-dir', type=str, default='datasets/indomain_val')
-    parser.add_argument('--eval-dir', type=str, default='datasets/oodomain_val')
+    parser.add_argument('--eval-dir', type=str, default='datasets/oodomain_test')
     parser.add_argument('--eval-datasets', type=str, default='race,relation_extraction,duorc')
-    parser.add_argument('--do-train', action='store_true', default=True)
-    parser.add_argument('--do-eval', action='store_true', default=True)
+    parser.add_argument('--do-train', action='store_true')
+    parser.add_argument('--do-eval', action='store_true')
     parser.add_argument('--sub-file', type=str, default='')
     parser.add_argument('--visualize-predictions', action='store_true')
     parser.add_argument('--eval-every', type=int, default=5000)
-    parser.add_argument("--deepspeed", action="store_true", help="Use deepspeed")
 
     args = parser.parse_args()
 
@@ -165,6 +163,7 @@ def get_dataset(args, datasets, data_dir, tokenizer, split_name):
 
         for k, v in dataset_dict_curr.items():
             dataset_dict_curr[k] = v[:num_samples]
+            print(f"Using {num_samples}/{len(v)} samples from {dataset}")
 
         dataset_dict = util.merge(dataset_dict, dataset_dict_curr)
 
@@ -178,69 +177,70 @@ def main():
     args = get_args()
     tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
     model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
-    train_datasets = {"squad": 3, "nat_questions": 3, "newsqa": 3}
-    val_datasets = {"squad": 100}
+    log = util.get_logger(args.save_dir, 'log_train')
+    train_datasets = {"squad": 3333, "nat_questions": 3333, "newsqa": 3333}
+    # val_datasets = {"squad": 4000, "nat_questions": 4000, "newsqa": 4000}
+    val_datasets = {"duorc": 400, "race": 400, "relation_extraction": 400}
+    args.eval_dir = "datasets/oodomain_val"
 
     if args.do_train:
         if not os.path.exists(args.save_dir):
             os.makedirs(args.save_dir)
         
-        log = util.get_logger(args.save_dir, 'log_train')
         log.info(f'Args: {json.dumps(vars(args), indent=2, sort_keys=True)}')
 
         log.info("Preparing Training Data...")
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        train_dataset, _ = get_dataset(args, train_datasets, args.train_dir, tokenizer, 'train')
+        train_dataset, train_dict = get_dataset(args, train_datasets, args.train_dir, tokenizer, 'train')
 
         log.info("Preparing Validation Data...")
         val_dataset, val_dict = get_dataset(args, val_datasets, args.eval_dir, tokenizer, 'val')
 
-        tad = {
-        "output_dir": args.save_dir,
-        "save_strategy": "epoch" if args.save_dir else "no",
-        "do_train": args.do_train,
-        "do_eval": args.do_eval,
-        "per_device_train_batch_size": 16,
-        "per_device_eval_batch_size": 16,
-        "learning_rate": args.lr,
-        "num_train_epochs": args.num_epochs,
-        "weight_decay": 0.01,
-        "fp16": True,
-        "deepspeed": "ds_config_zero_1.json" if args.deepspeed else None,
-        }
+        # print(f"train dataset keys: ", train_dataset.keys)
+        # print(f"train dict keys: ", train_dict.keys())
+        # print(f"vak dataset keys: ", val_dataset.keys)
+        # print(f"vak dict keys: ", val_dict.keys())
 
-        # train_loader = DataLoader(train_dataset,
-        #                         batch_size=args.batch_size,
-        #                         sampler=RandomSampler(train_dataset))
-        # val_loader = DataLoader(val_dataset,
-        #                         batch_size=args.batch_size,
-        #                         sampler=SequentialSampler(val_dataset))
+        # tad = {
+        # "output_dir": args.save_dir,
+        # "save_strategy": "epoch" if args.save_dir else "no",
+        # "do_train": args.do_train,
+        # "do_eval": args.do_eval,
+        # "per_device_train_batch_size": 16,
+        # "per_device_eval_batch_size": 16,
+        # "learning_rate": args.lr,
+        # "num_train_epochs": args.num_epochs,
+        # "weight_decay": 0.01,
+        # "fp16": True,
+        # "deepspeed": "ds_config_zero_1.json" if args.deepspeed else None,
+        # }
 
-        trainer = Trainer(
-            model=model,
-            args=TrainingArguments(**tad),
-            train_dataset=train_dataset,
-            eval_dataset=val_dataset,
-            tokenizer=tokenizer,
-            data_collator=DefaultDataCollator(),
-        )
+        train_loader = DataLoader(train_dataset,
+                                batch_size=args.batch_size,
+                                sampler=RandomSampler(train_dataset))
+        val_loader = DataLoader(val_dataset,
+                                batch_size=args.batch_size,
+                                sampler=SequentialSampler(val_dataset))
+        log.info("TRAINING")
+        trainer = Trainer(args, log)
         
 
-        train_result = trainer.train()
+        train_result = trainer.train(model, train_loader, val_loader, val_dict)
 
+        log.info("FINISHED TRAINING")
         # extract performance metrics
-        train_metrics = train_result.metrics
-        train_metrics["train_samples"] = sum(train_datasets.values())
-        trainer.log_metrics("train", train_metrics)
+        # train_metrics = train_result.metrics
+        # train_metrics["train_samples"] = sum(train_datasets.values())
+        # trainer.log_metrics("train", train_metrics)
     
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         split_name = 'test' if 'test' in args.eval_dir else 'validation'
-        log = util.get_logger(args.save_dir, f'log_{split_name}')
-        # trainer = Trainer(args, log)
-        # checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
-        # model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
-        # model.to(args.device)
+        # log = util.get_logger(args.save_dir, f'log_{split_name}')
+        trainer = Trainer(args, log)
+        checkpoint_path = os.path.join(args.save_dir, 'checkpoint')
+        model = DistilBertForQuestionAnswering.from_pretrained(checkpoint_path)
+        model.to(args.device)
         eval_dataset, eval_dict = get_dataset(args, val_datasets, args.eval_dir, tokenizer, split_name)
         eval_loader = DataLoader(eval_dataset,
                                  batch_size=args.batch_size,
@@ -251,13 +251,13 @@ def main():
         results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in eval_scores.items())
         log.info(f'Eval {results_str}')
         # Write submission file
-        sub_path = os.path.join(args.save_dir, split_name + '_' + args.sub_file)
-        log.info(f'Writing submission file to {sub_path}...')
-        with open(sub_path, 'w', newline='', encoding='utf-8') as csv_fh:
-            csv_writer = csv.writer(csv_fh, delimiter=',')
-            csv_writer.writerow(['Id', 'Predicted'])
-            for uuid in sorted(eval_preds):
-                csv_writer.writerow([uuid, eval_preds[uuid]])
+        # sub_path = os.path.join(args.save_dir, split_name + '_' + args.sub_file)
+        # log.info(f'Writing submission file to {sub_path}...')
+        # with open(sub_path, 'w', newline='', encoding='utf-8') as csv_fh:
+        #     csv_writer = csv.writer(csv_fh, delimiter=',')
+        #     csv_writer.writerow(['Id', 'Predicted'])
+        #     for uuid in sorted(eval_preds):
+        #         csv_writer.writerow([uuid, eval_preds[uuid]])
 
     log.info(f"TIME {round(time.time() - st)}s")
 
