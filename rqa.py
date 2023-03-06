@@ -145,7 +145,6 @@ def read_and_process(args, tokenizer, dataset_dict, dir_name, dataset_name, spli
 
     if os.path.exists(cache_path) and not args.recompute_features:
         tokenized_examples = util.load_pickle(cache_path)
-        print(len(tokenized_examples))
     else:
         if split=='train':
             tokenized_examples = prepare_train_data(dataset_dict, tokenizer)
@@ -213,7 +212,13 @@ def main():
         
         train_result = trainer.train(model, train_loader, val_loader, val_dict)
 
-        log.info("FINISHED TRAINING", json.dump(train_result))
+        log.info("FINISHED TRAINING")
+
+        if not os.path.exists(os.path.join(args.save_dir, "training_results")):
+            os.makedirs(os.path.join(args.save_dir, "training_results"))
+        with open(os.path.join(args.save_dir, "training_results", f"train-{round(time.time())}.json"), 'w') as f:
+            json.dump(train_result, f)
+            f.close()
     
     if args.do_eval:
         args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')

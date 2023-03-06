@@ -109,10 +109,7 @@ class Trainer():
                                            split='val',
                                            num_visuals=self.num_visuals)
                                         
-                        # if curr_score['F1'] >= best_scores['F1']:
-                        #     best_scores = curr_score
-                        #     self.save(model)
-                        best_scores.append({'step': global_idx, 'F1': curr_score['F1'], 'EM': curr_score['EM']})
+                        best_scores.append({'epoch': epoch_num, 'step': global_idx, 'F1': curr_score['F1'], 'EM': curr_score['EM']})
                         
                     global_idx += 1
         
@@ -134,7 +131,7 @@ class Trainer():
                             split='val',
                             num_visuals=self.num_visuals)
                         
-        best_scores.append({'step': global_idx, 'F1': curr_score['F1'], 'EM': curr_score['EM']})
+        best_scores.append({'epoch': epoch_num, 'step': global_idx, 'F1': curr_score['F1'], 'EM': curr_score['EM']})
         self.save(model)
 
         return best_scores

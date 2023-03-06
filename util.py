@@ -314,15 +314,6 @@ def postprocess_qa_predictions(examples, features, predictions,
     all_start_logits, all_end_logits = predictions
     # Build a map example to its corresponding features.
     example_id_to_index = {k: i for i, k in enumerate(examples["id"])}
-
-    # ff = list(features['id'])
-    # ee = list(examples["id"])
-    # ff.sort()
-    # ee.sort()
-
-    # for f, e in zip(ff[:10], ee[:10]):
-    #     print(f"{e} -> {f}")
-
     features_per_example = ddict(list)
     for i, feat_id in enumerate(features['id']):
         features_per_example[example_id_to_index[feat_id]].append(i)
