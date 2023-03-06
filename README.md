@@ -4,18 +4,24 @@ Project for CSCI6908 NLP with Deep Learning
 
 ## Info
 
+This document is outdated.
+
 ### Models
 
+```bash
 distilbert-base-uncased
 distilbert-base-cased-distilled-squad
 machine2049/distilbert-base-uncased-finetuned-duorc_distilbert
 gsgoncalves/distilbert-base-uncased-race
+```
 
 ### Datasets
 
+```bash
 squad
 duorc
 race
+```
 
 ## Results
 
@@ -31,4 +37,3 @@ race
 | distilbert-base-uncased                                        | duorc | duorc      | 35.884 | 44.896 |
 | distilbert-base-uncased                                        | duorc | squad      | 37.234 | 49.382 |
 | distilbert-base-uncased                                        | squad | duorc      | 33.330 | 42.270 |
-
