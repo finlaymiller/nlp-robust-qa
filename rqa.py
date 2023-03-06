@@ -33,7 +33,7 @@ def get_args():
     parser.add_argument('--do-eval', action='store_true')
     parser.add_argument('--sub-file', type=str, default='')
     parser.add_argument('--visualize-predictions', action='store_true')
-    parser.add_argument('--eval-every', type=int, default=200)
+    parser.add_argument('--eval-every', type=int, default=3000)
     parser.add_argument('--load-model', type=str)
 
     args = parser.parse_args()
@@ -184,7 +184,7 @@ def main():
     log = util.get_logger(args.save_dir, 'log_train')
     # train_datasets = {"duorc": 100, "race": 100, "relation_extraction": 100}
     train_datasets = {"squad": 3333, "nat_questions": 3333, "newsqa": 3333}
-    val_datasets = {"squad": 4000, "nat_questions": 4000, "newsqa": 4000}
+    val_datasets = {"squad": 1000, "nat_questions": 1000, "newsqa": 1000}
     # val_datasets = {"duorc": 400, "race": 400, "relation_extraction": 400}
     args.eval_dir = "datasets/indomain_val"
 
