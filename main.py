@@ -1,24 +1,18 @@
 import argparse
 from pathlib import Path
 import os
+import time
 import json
 import torch
 import numpy as np
 from tqdm.auto import tqdm
 import collections
-from datasets import load_dataset, load_metric
+import evaluate
+from datasets import load_dataset
 from transformers import DistilBertForQuestionAnswering, DistilBertTokenizerFast, TrainingArguments, Trainer, DefaultDataCollator
 
-# Models
-# distilbert-base-uncased
-# distilbert-base-cased-distilled-squad
-# machine2049/distilbert-base-uncased-finetuned-duorc_distilbert
-# Datasets
-# squad
-# duorc
 
-ds = "duorc"
-ms = "machine2049/distilbert-base-uncased-finetuned-duorc_distilbert"
+ms = "distilbert-base-uncased"
 pad_on_right = False
 tokenizer = None
 
@@ -26,6 +20,9 @@ def get_args(raw_args=None):
     parser = argparse.ArgumentParser(description="DistilBERT Fine-Tuning")
 
     parser.add_argument("--deepspeed", action="store_true", help="Use deepspeed")
+    parser.add_argument("--train", action="store", default="squad", help="Dataset to finetune on")
+    parser.add_argument("--test", action="store", default="squad", help="Dataset to test on")
+    parser.add_argument("--save", action="store_true", help="Save model")
 
     args = parser.parse_args(raw_args)
     print(f"input parameters {vars(args)}")
@@ -140,7 +137,6 @@ def preprocess_squad(examples, tokenizer):
     return inputs
 
 def prepare_validation_features(examples):
-    global ds
     global tokenizer
     # Some of the questions have lots of whitespace on the left, which is not useful and will make the
     # truncation of the context fail (the tokenized question will take a lots of space). So we remove that
@@ -174,7 +170,7 @@ def prepare_validation_features(examples):
 
         # One example can give several spans, this is the index of the example containing this span of text.
         sample_index = sample_mapping[i]
-        tokenized_examples["example_id"].append(examples["id" if ds == "squad" else "question_id"][sample_index])
+        tokenized_examples["example_id"].append(examples["id"][sample_index])
 
         # Set to None the offset_mapping that are not part of the context so it's easy to determine if a token
         # position is part of the context or not.
@@ -186,11 +182,9 @@ def prepare_validation_features(examples):
     return tokenized_examples
 
 def postprocess_qa_predictions(examples, features, raw_predictions, n_best_size = 20, max_answer_length = 30):
-    global ds
-
     all_start_logits, all_end_logits = raw_predictions
     # Build a map example to its corresponding features.
-    example_id_to_index = {k: i for i, k in enumerate(examples["id" if ds == "squad" else "question_id"])}
+    example_id_to_index = {k: i for i, k in enumerate(examples["id"])}
     features_per_example = collections.defaultdict(list)
     for i, feature in enumerate(features):
         features_per_example[example_id_to_index[feature["example_id"]]].append(i)
@@ -260,13 +254,13 @@ def postprocess_qa_predictions(examples, features, raw_predictions, n_best_size 
             best_answer = {"text": "", "score": 0.0}
         
         # Let's pick our final answer
-        predictions[example["id" if ds == "squad" else "question_id"]] = best_answer["text"]
+        predictions[example["id"]] = best_answer["text"]
 
     return predictions
 
 # NOTE: Training pipeline adapted from https://huggingface.co/docs/transformers/tasks/question_answering
 def main(raw_args=None):
-    global ds
+    st = time.time()
     global ms
     global tokenizer
     global pad_on_right
@@ -280,36 +274,49 @@ def main(raw_args=None):
 
     args = get_args(raw_args)
 
-    # load the SQuAD dataset from the Huggingface Datasets library
-    dataset = load_dataset("squad", split="validation") if ds == "squad" else load_dataset("duorc", "SelfRC", split="validation")
+    # load the dataset
+    if args.train == "squad":
+        dataset = load_dataset("squad", split="train")
+    elif args.train == "duorc":
+        dataset = load_dataset("duorc", "SelfRC", split="train")
 
-    if ds == "duorc":
+    if args.test == "squad":
+        val_dataset = load_dataset("squad", split="validation")
+    elif args.test == "duorc":
+        val_dataset = load_dataset("duorc", "SelfRC", split="validation")
+    
+    # rename columns to align with squad names
+    if args.train == "duorc":
         dataset = dataset.rename_column("plot", "context")
+        dataset = dataset.rename_column("question_id", "id")
+    if args.test == "duorc":
+        val_dataset = val_dataset.rename_column("plot", "context")
+        val_dataset = val_dataset.rename_column("question_id", "id")
 
     # load pretrained model and tokenizer
     tokenizer = DistilBertTokenizerFast.from_pretrained(ms)
     model = DistilBertForQuestionAnswering.from_pretrained(ms)
-
     pad_on_right = tokenizer.padding_side == "right"
 
-    ppf = preprocess_squad if ds == "squad" else preprocess_duorc
-
     # tokenize the data
+    ppf = preprocess_squad if args.train == "squad" else preprocess_duorc
     tokenized_dataset = dataset.map(ppf, fn_kwargs={"tokenizer": tokenizer}, batched=True, remove_columns=dataset.column_names)
+    ppfv = preprocess_squad if args.test == "squad" else preprocess_duorc
+    tokenized_dataset_v = val_dataset.map(ppfv, fn_kwargs={"tokenizer": tokenizer}, batched=True, remove_columns=val_dataset.column_names)
 
     # initialize training arguments
     training_args_dict = {
         "output_dir": ".outputs", # for intermediary checkpoints
-        "do_train": True,
+        "save_strategy": "epoch" if args.save else "no",
+        "do_train": args.train is not None,
         "do_eval": True,
         "per_device_train_batch_size": 16,
         "per_device_eval_batch_size": 16,
         "learning_rate": 2e-5,
-        "num_train_epochs": 50,
+        "num_train_epochs": 3,
         "weight_decay": 0.01,
         "fp16": True,
         "deepspeed": "ds_config_zero_1.json" if args.deepspeed else None,
-        # "report_to": ["azure_ml", "mlflow"],
     }
     training_args = TrainingArguments(**training_args_dict)
 
@@ -317,37 +324,32 @@ def main(raw_args=None):
     trainer = Trainer(
         model=model,
         args=training_args,
-        # train_dataset=tokenized_dataset["train"],
-        # eval_dataset=tokenized_dataset["validation"],
-        eval_dataset=tokenized_dataset,
+        train_dataset=tokenized_dataset.select(range(10000)),
+        eval_dataset=tokenized_dataset_v,
         tokenizer=tokenizer,
         data_collator=DefaultDataCollator(),
     )
 
-    # # train
-    # train_result = trainer.train()
+    # train
+    if args.train:
+        train_result = trainer.train()
 
-    # # extract performance metrics
-    # train_metrics = train_result.metrics
-    # train_metrics["train_samples"] = len(tokenized_squad["train"])
-    # trainer.log_metrics("train", train_metrics)
+        # extract performance metrics
+        train_metrics = train_result.metrics
+        train_metrics["train_samples"] = len(tokenized_dataset)
+        trainer.log_metrics("train", train_metrics)
 
-    # eval_metrics = trainer.evaluate()
-    # eval_metrics["eval_samples"] = len(tokenized_dataset["validation"])
-    # trainer.log_metrics("eval", eval_metrics)
+        # save trained model
+        if args.save:
+            trained_model_folder = f"{ms}-finetuned-{args.train}"
+            trained_model_path = Path(trained_model_folder)
+            trained_model_path.mkdir(parents=True, exist_ok=True)
+            trainer.model.save_pretrained(trained_model_path / "weights")
 
-    # rank = os.environ.get("RANK", -1)
-    # if int(rank) == 0:
-    #     # save trained model
-    #     trained_model_folder = "model"
-    #     # trained_model_path = Path(trained_model_folder)
-    #     # trained_model_path.mkdir(parents=True, exist_ok=True)
-    #     # model.save_pretrained(trained_model_path / "weights")
-
-    #     # upload saved data to AML
-    #     # documentation: https://learn.microsoft.com/en-us/python/api/azureml-core/azureml.core.run(class)?view=azure-ml-py
-    #     run = Run.get_context()
-    #     run.upload_folder(name="model", path=trained_model_folder)
+    # eval
+    eval_metrics = trainer.evaluate()
+    eval_metrics["eval_samples"] = len(tokenized_dataset_v)
+    trainer.log_metrics("eval", eval_metrics)
 
     batch = None
     for batch in trainer.get_eval_dataloader():
@@ -356,10 +358,10 @@ def main(raw_args=None):
     with torch.no_grad():
         output = trainer.model(**batch)
 
-    validation_features = dataset.map(
+    validation_features = val_dataset.map(
         prepare_validation_features,
         batched=True,
-        remove_columns=dataset.column_names
+        remove_columns=val_dataset.column_names
     )
 
     raw_predictions = trainer.predict(validation_features)
@@ -370,7 +372,7 @@ def main(raw_args=None):
     offset_mapping = validation_features[0]["offset_mapping"]
     # The first feature comes from the first example. For the more general case, we will need to be match the example_id to
     # an example inde
-    context = dataset[0]["context"]
+    context = val_dataset[0]["context"]
 
     # Gather the indices the best start/end logits:
     start_indexes = np.argsort(start_logits)[-1 : -n_best_size - 1 : -1].tolist()
@@ -400,20 +402,19 @@ def main(raw_args=None):
                     }
                 )
 
-    ids = "id" if ds == "squad" else "question_id"
     valid_answers = sorted(valid_answers, key=lambda x: x["score"], reverse=True)[:n_best_size]
-    example_id_to_index = {k: i for i, k in enumerate(dataset[ids])}
+    example_id_to_index = {k: i for i, k in enumerate(val_dataset["id"])}
     features_per_example = collections.defaultdict(list)
-    references = [{"id": ex[ids], "answers": ex["answers"]} for ex in dataset]
+    references = [{"id": ex["id"], "answers": ex["answers"]} for ex in val_dataset]
 
     for i, feature in enumerate(validation_features):
         features_per_example[example_id_to_index[feature["example_id"]]].append(i)
 
-    final_predictions = postprocess_qa_predictions(dataset, validation_features, raw_predictions.predictions)
+    final_predictions = postprocess_qa_predictions(val_dataset, validation_features, raw_predictions.predictions)
 
     # export to files for evaluation
-    if ds == "duorc":
-        from evaluate import load_eval
+    if args.test != "squad":
+        from eval_custom import load_eval
         da = "duorc_answers.json"
         dp = "duorc_predictions.json"
 
@@ -430,13 +431,13 @@ def main(raw_args=None):
             json.dump(predictions, f)
             f.close()
 
-        res = load_eval(da, dp)
+        res = load_eval(da, dp, args.test)
     else:
-        metric = load_metric(ds)
+        metric = evaluate.load(args.test)
         formatted_predictions = [{"id": k, "prediction_text": v} for k, v in final_predictions.items()]
         res = metric.compute(predictions=formatted_predictions, references=references)
 
-    print(f"Finished evaluating {ms} on {ds}", res)
+    print(f"Finished evaluating {ms} on {args.test} (finetuned on {args.train}) in {round(time.time() - st)}s", res)
 
 if __name__ == "__main__":
     main()
